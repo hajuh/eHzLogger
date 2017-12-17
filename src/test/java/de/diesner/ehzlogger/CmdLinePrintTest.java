@@ -7,6 +7,7 @@ import org.junit.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
+import java.util.Locale;
 import java.util.Properties;
 
 import static org.hamcrest.CoreMatchers.equalTo;
@@ -37,6 +38,7 @@ public class CmdLinePrintTest {
 
     @Test
     public void messageReceived() throws Exception {
+        Locale.setDefault(Locale.GERMAN);
         CmdLinePrint cmdLinePrint = new CmdLinePrint(smartMeterRegisterList);
         cmdLinePrint.messageReceived(TestData.sampleMessage());
 

@@ -1,24 +1,30 @@
 package de.diesner.ehzlogger;
 
+import de.diesner.ehzlogger.source.SMLSource;
+import de.diesner.ehzlogger.source.SMLSourceException;
+import de.diesner.ehzlogger.source.SerialSMLSource;
+import de.diesner.ehzlogger.source.TcpSMLSource;
 import gnu.io.PortInUseException;
 import gnu.io.UnsupportedCommOperationException;
+import org.eclipse.paho.client.mqttv3.MqttException;
 import org.openmuc.jsml.structures.SML_File;
-import org.openmuc.jsml.tl.SML_SerialReceiver;
 
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 
 public class EhzLogger {
 
-    private SML_SerialReceiver receiver;
-    private String port;
+    private String connString;
     private SmartMeterRegisterList smartMeterRegisterList;
     private List<SmlForwarder> forwarderList;
     private Properties properties;
+    private SMLSource source;
 
     public static void main(String[] args) {
         EhzLogger ehzLogger;
@@ -35,6 +41,12 @@ public class EhzLogger {
                 e.printStackTrace();
             } catch (UnsupportedCommOperationException e) {
                 e.printStackTrace();
+            } catch (URISyntaxException e) {
+                e.printStackTrace();
+            } catch (MqttException e) {
+                e.printStackTrace();
+            } catch (SMLSourceException e) {
+                e.printStackTrace();
             }
             ehzLogger.shutdown();
         }
@@ -48,7 +60,7 @@ public class EhzLogger {
      * @throws IOException
      * @throws UnsupportedCommOperationException
      */
-    private boolean initialize(String[] args) throws PortInUseException, IOException, UnsupportedCommOperationException {
+    private boolean initialize(String[] args) throws PortInUseException, IOException, UnsupportedCommOperationException, URISyntaxException, MqttException, SMLSourceException {
         properties = new Properties();
 
         InputStream is;
@@ -64,12 +76,18 @@ public class EhzLogger {
             is.close();
         }
 
-        receiver = new SML_SerialReceiver();
-        port = properties.getProperty("serial.port", "/dev/ttyUSB0");
-        System.setProperty("gnu.io.rxtx.SerialPorts", port);
-
+        connString = properties.getProperty("sml.src", "serial:///dev/ttyUSB0");
         smartMeterRegisterList = new SmartMeterRegisterList(properties);
-        receiver.setupComPort(port);
+
+        URI uri = new URI(connString);
+        String scheme = uri.getScheme();
+        if (scheme.equalsIgnoreCase("tcp")) {
+            source = new TcpSMLSource(uri.getSchemeSpecificPart());
+        } else if (scheme.equalsIgnoreCase("serial")) {
+            source = new SerialSMLSource(uri.getSchemeSpecificPart());
+        } else {
+            throw new RuntimeException("Unknown scheme: " + scheme );
+        }
 
         forwarderList = new ArrayList<>();
         if (Boolean.parseBoolean(properties.getProperty("output.cmdline.enabled"))) {
@@ -78,27 +96,45 @@ public class EhzLogger {
         if (Boolean.parseBoolean(properties.getProperty("output.influxdb.enabled"))) {
             forwarderList.add(new InfluxDbForward(properties.getProperty("output.influxdb.remoteUri"), properties.getProperty("output.influxdb.measurement"), smartMeterRegisterList));
         }
+        if (Boolean.parseBoolean(properties.getProperty("output.mqtt.enabled"))) {
+            forwarderList.add(new MqttForward(properties.getProperty("output.mqtt.remoteUri"), properties.getProperty("output.mqtt.clientId"), properties.getProperty("output.mqtt.topic"), smartMeterRegisterList));
+        }
 
         if (forwarderList.isEmpty()) {
             return false;
         }
+
         return true;
     }
 
     private void receiveMessageLoop() throws IOException {
 
         while (true) {
-            SML_File smlFile = receiver.getSMLFile();
-            for (SmlForwarder forwarder : forwarderList) {
-                forwarder.messageReceived(smlFile.getMessages());
+            try {
+                SML_File smlFile = source.read();
+                if (smlFile!=null) {
+                    for (SmlForwarder forwarder : forwarderList) {
+                        forwarder.messageReceived(smlFile.getMessages());
+                    }
+                } else {
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+            } catch (SMLSourceException e) {
+                e.printStackTrace();
+            } catch (NullPointerException e) {
+                e.printStackTrace();
             }
         }
     }
 
     private void shutdown() {
         try {
-            receiver.close();
-        } catch (IOException e) {
+            source.close();
+        } catch (SMLSourceException e) {
             System.err.println("Error while trying to close serial port: " + e.getMessage());
         }
     }
